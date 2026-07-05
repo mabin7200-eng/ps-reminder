@@ -1,0 +1,13 @@
+{
+  "name": "ps-expense-reminder",
+  "version": "2.0.0",
+  "description": "PS Expense Daily Telegram Reminder with missed day catch-up",
+  "main": "notify.js",
+  "scripts": {
+    "start": "node notify.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^11.11.0",
+    "node-fetch": "^2.7.0"
+  }
+}
