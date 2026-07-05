@@ -25,7 +25,7 @@ const USER_UID  = process.env.FIREBASE_USER_UID;
 
 // ── Telegram Send ────────────────────────────────────────
 async function sendTelegram(message) {
-  const url = https://api.telegram.org/bot${TOKEN}/sendMessage;
+  const url = https://api.telegram.org/bot${BOT_TOKEN}/sendMessage;
   const res  = await fetch(url, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
