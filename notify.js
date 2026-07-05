@@ -1,13 +1,11 @@
-// ═══════════════════════════════════════════════════════════
-// PS Expense — Daily Telegram Reminder
+// PS Expense - Daily Telegram Reminder
 // Runs every day at 4:00 AM IST
-// If missed yesterday — catches up and sends both days
-// ═══════════════════════════════════════════════════════════
+// If missed yesterday - catches up and sends both days
 
 const admin = require('firebase-admin');
 const fetch  = require('node-fetch');
 
-// ── Firebase Init ────────────────────────────────────────
+// Firebase Init
 admin.initializeApp({
   credential: admin.credential.cert({
     type:         'service_account',
@@ -18,15 +16,15 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// ── Config ───────────────────────────────────────────────
+// Config
 const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const USER_UID  = process.env.FIREBASE_USER_UID;
 
-// ── Telegram Send ────────────────────────────────────────
+// Send Telegram message
 async function sendTelegram(message) {
-  const url = https://api.telegram.org/bot${BOT_TOKEN}/sendMessage;
-  const res  = await fetch(url, {
+  const url = 'https://api.telegram.org/bot' + BOT_TOKEN + '/sendMessage';
+  const res = await fetch(url, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -37,13 +35,13 @@ async function sendTelegram(message) {
   });
   const data = await res.json();
   if (!data.ok) throw new Error('Telegram error: ' + JSON.stringify(data));
-  console.log('✅ Telegram sent');
+  console.log('Telegram sent OK');
   return true;
 }
 
-// ── Date Helpers ─────────────────────────────────────────
+// Date helpers
 function todayStr() {
-  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  return new Date().toISOString().split('T')[0];
 }
 
 function yesterdayStr() {
@@ -75,13 +73,13 @@ function nextDueDate(lastDate, freq) {
 }
 
 function fmtDate(str) {
-  if (!str) return '—';
+  if (!str) return '--';
   return new Date(str).toLocaleDateString('en-IN', {
     day:'numeric', month:'short', year:'numeric'
   });
 }
 
-// ── Check & Save Last Sent Date ──────────────────────────
+// Read last sent date from Firebase
 async function getLastSentDate() {
   try {
     const snap = await db
@@ -96,265 +94,290 @@ async function getLastSentDate() {
   }
 }
 
+// Save last sent date to Firebase
 async function saveLastSentDate(dateStr) {
   try {
     await db
       .collection('users').doc(USER_UID)
       .collection('data').doc('reminderMeta')
       .set({ lastSentDate: dateStr, sentAt: new Date().toISOString() }, { merge: true });
-    console.log('✅ Saved lastSentDate:', dateStr);
+    console.log('Saved lastSentDate:', dateStr);
   } catch(e) {
     console.log('Could not save lastSentDate:', e.message);
   }
 }
 
-// ── Section Processors ───────────────────────────────────
-
+// Process tasks
 function processTasks(data) {
   const tasks = data.tasks || [];
   if (!tasks.length) return null;
 
-  const overdue = [], dueSoon = [], upcoming = [];
-  tasks.forEach(t => {
+  const overdue = [];
+  const dueSoon = [];
+  const upcoming = [];
+
+  tasks.forEach(function(t) {
     if (!t.lastDate || !t.freq) return;
-    const next = nextDueDate(t.lastDate, t.freq);
-    const d    = daysLeft(next);
+    var next = nextDueDate(t.lastDate, t.freq);
+    var d = daysLeft(next);
     if (d === null) return;
-    if (d < 0)        overdue.push({...t, d, next});
-    else if (d <= 10) dueSoon.push({...t, d, next});
-    else              upcoming.push({...t, d, next});
+    if (d < 0) overdue.push({ name: t.name, d: d, next: next, remarks: t.remarks });
+    else if (d <= 10) dueSoon.push({ name: t.name, d: d, next: next, remarks: t.remarks });
+    else upcoming.push({ name: t.name, d: d, next: next });
   });
 
-  [overdue, dueSoon, upcoming].forEach(a => a.sort((x,y) => x.d - y.d));
-  const hasAlerts = overdue.length > 0 || dueSoon.length > 0;
+  overdue.sort(function(a,b){ return a.d - b.d; });
+  dueSoon.sort(function(a,b){ return a.d - b.d; });
 
-  let msg = \n🔔 <b>TASK REMINDERS</b>\n;
+  var hasAlerts = overdue.length > 0 || dueSoon.length > 0;
+  var msg = '\n<b>TASK REMINDERS</b>\n';
+
   if (overdue.length) {
-    msg += 🔴 <b>Overdue:</b>\n;
-    overdue.forEach(t => {
-      msg += `  • <b>${t.name}</b> — ${Math.abs(t.d)} day${Math.abs(t.d)!==1?'s':''} overdue\n`;
-      if (t.remarks) msg += `    📝 ${t.remarks}\n`;
+    msg += 'OVERDUE:\n';
+    overdue.forEach(function(t) {
+      msg += '  - <b>' + t.name + '</b> -- ' + Math.abs(t.d) + ' days overdue\n';
+      if (t.remarks) msg += '    Note: ' + t.remarks + '\n';
     });
   }
   if (dueSoon.length) {
-    msg += 🟡 <b>Due Soon:</b>\n;
-    dueSoon.forEach(t => {
-      const label = t.d===0?'⚡ TODAY':t.d===1?'⚡ Tomorrow':in ${t.d} days;
-      msg += `  • <b>${t.name}</b> — ${label} (${fmtDate(t.next)})\n`;
+    msg += 'DUE SOON:\n';
+    dueSoon.forEach(function(t) {
+      var label = t.d === 0 ? 'TODAY' : t.d === 1 ? 'Tomorrow' : 'in ' + t.d + ' days';
+      msg += '  - <b>' + t.name + '</b> -- ' + label + ' (' + fmtDate(t.next) + ')\n';
     });
   }
-  if (!hasAlerts) msg += `  ✅ All tasks on track!\n`;
-  if (upcoming.length) {
-    msg += 📅 <i>Upcoming: ${upcoming.slice(0,3).map(t=>${t.name} (${t.d}d)).join(', ')}</i>\n;
+  if (!hasAlerts) {
+    msg += '  All tasks on track!\n';
   }
-  return { hasAlerts, msg };
+  if (upcoming.length) {
+    var upNames = upcoming.slice(0,3).map(function(t){ return t.name + ' (' + t.d + 'd)'; }).join(', ');
+    msg += 'Upcoming: ' + upNames + '\n';
+  }
+  return { hasAlerts: hasAlerts, msg: msg };
 }
 
+// Process documents
 function processDocs(data) {
-  const docs        = data.docs || [];
-  const expiryTypes = ['Passport','Health Insurance'];
-  const relevant    = docs.filter(d => expiryTypes.includes(d.type) && d.expiry);
+  var docs = data.docs || [];
+  var expiryTypes = ['Passport', 'Health Insurance'];
+  var relevant = docs.filter(function(d) {
+    return expiryTypes.indexOf(d.type) !== -1 && d.expiry;
+  });
   if (!relevant.length) return null;
 
-  const expired = [], expiring = [];
-  relevant.forEach(doc => {
-    const d = daysLeft(doc.expiry);
+  var expired = [];
+  var expiring = [];
+
+  relevant.forEach(function(doc) {
+    var d = daysLeft(doc.expiry);
     if (d === null) return;
-    if (d < 0)        expired.push({...doc, d});
-    else if (d <= 30) expiring.push({...doc, d});
+    if (d < 0) expired.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
+    else if (d <= 30) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
   });
-  [expired, expiring].forEach(a => a.sort((x,y)=>x.d-y.d));
+
   if (!expired.length && !expiring.length) return null;
 
-  let msg = \n🗂️ <b>DOCUMENT EXPIRY</b>\n;
+  var msg = '\n<b>DOCUMENT EXPIRY</b>\n';
   if (expired.length) {
-    msg += 🔴 <b>Expired:</b>\n;
-    expired.forEach(d => {
-      msg += `  • <b>${d.name}'s ${d.type}</b> — expired ${Math.abs(d.d)} days ago!\n`;
+    msg += 'EXPIRED:\n';
+    expired.forEach(function(d) {
+      msg += '  - <b>' + d.name + ' ' + d.type + '</b> -- expired ' + Math.abs(d.d) + ' days ago!\n';
     });
   }
   if (expiring.length) {
-    msg += 🟡 <b>Expiring:</b>\n;
-    expiring.forEach(d => {
-      const label = d.d===0?'TODAY':d.d===1?'Tomorrow':in ${d.d} days;
-      msg += `  • <b>${d.name}'s ${d.type}</b> — ${label} (${fmtDate(d.expiry)})\n`;
+    msg += 'EXPIRING SOON:\n';
+    expiring.forEach(function(d) {
+      var label = d.d === 0 ? 'TODAY' : d.d === 1 ? 'Tomorrow' : 'in ' + d.d + ' days';
+      msg += '  - <b>' + d.name + ' ' + d.type + '</b> -- ' + label + ' (' + fmtDate(d.expiry) + ')\n';
     });
   }
-  return { hasAlerts: true, msg };
+  return { hasAlerts: true, msg: msg };
 }
 
+// Process vehicles
 function processVehicles(data) {
-  const vehicles = data.vehicles || [];
+  var vehicles = data.vehicles || [];
   if (!vehicles.length) return null;
 
-  const vDocs = [
-    { key:'fc',   label:'FC',        icon:'🔧' },
-    { key:'ins',  label:'Insurance', icon:'🛡️' },
-    { key:'tax',  label:'Road Tax',  icon:'🏛️' },
-    { key:'pucc', label:'PUCC',      icon:'🌿' },
+  var vDocs = [
+    { key: 'fc',   label: 'FC',        icon: 'FC' },
+    { key: 'ins',  label: 'Insurance', icon: 'INS' },
+    { key: 'tax',  label: 'Road Tax',  icon: 'TAX' },
+    { key: 'pucc', label: 'PUCC',      icon: 'PUCC' },
   ];
 
-  const expired = [], expiring = [];
-  vehicles.forEach(v => {
-    vDocs.forEach(vd => {
-      if (v[vd.key+'_none']) return;
-      const expiry = v[vd.key+'_expiry'];
+  var expired = [];
+  var expiring = [];
+
+  vehicles.forEach(function(v) {
+    vDocs.forEach(function(vd) {
+      if (v[vd.key + '_none']) return;
+      var expiry = v[vd.key + '_expiry'];
       if (!expiry) return;
-      const d = daysLeft(expiry);
+      var d = daysLeft(expiry);
       if (d !== null) {
-        const item = { vehicle:v.name, plate:v.plate||'', doc:vd.label, icon:vd.icon, d, expiry };
-        if (d < 0)        expired.push(item);
+        var item = { vehicle: v.name, plate: v.plate || '', doc: vd.label, d: d, expiry: expiry };
+        if (d < 0) expired.push(item);
         else if (d <= 30) expiring.push(item);
       }
     });
   });
-  [expired, expiring].forEach(a => a.sort((x,y)=>x.d-y.d));
+
   if (!expired.length && !expiring.length) return null;
 
-  let msg = \n🚗 <b>VEHICLE DOCUMENTS</b>\n;
+  var msg = '\n<b>VEHICLE DOCUMENTS</b>\n';
   if (expired.length) {
-    msg += 🔴 <b>Expired:</b>\n;
-    expired.forEach(a => {
-      msg += `  • <b>${a.vehicle}</b>${a.plate?` (${a.plate}):''} — ${a.icon} ${a.doc} expired ${Math.abs(a.d)} days ago!\n;
+    msg += 'EXPIRED:\n';
+    expired.forEach(function(a) {
+      msg += '  - <b>' + a.vehicle + '</b> -- ' + a.doc + ' expired ' + Math.abs(a.d) + ' days ago!\n';
     });
   }
   if (expiring.length) {
-    msg += 🟡 <b>Expiring:</b>\n;
-    expiring.forEach(a => {
-      const label = a.d===0?'TODAY':a.d===1?'Tomorrow':in ${a.d} days;
-      msg += `  • <b>${a.vehicle}</b>${a.plate?` (${a.plate}):''} — ${a.icon} ${a.doc} ${label}\n;
+    msg += 'EXPIRING SOON:\n';
+    expiring.forEach(function(a) {
+      var label = a.d === 0 ? 'TODAY' : a.d === 1 ? 'Tomorrow' : 'in ' + a.d + ' days';
+      msg += '  - <b>' + a.vehicle + '</b> -- ' + a.doc + ' ' + label + '\n';
     });
   }
-  return { hasAlerts: true, msg };
+  return { hasAlerts: true, msg: msg };
 }
 
+// Process maintenance KMS
 function processMaintenance(data) {
-  const maintRecords = data.maintRecords || [];
-  const vehicleKms   = data.vehicleKms   || {};
+  var maintRecords = data.maintRecords || [];
+  var vehicleKms   = data.vehicleKms   || {};
   if (!maintRecords.length) return null;
 
-  const vehicleNames = [...new Set(maintRecords.map(r=>r.vehicleName).filter(Boolean))];
-  const overdue = [], soon = [];
+  var vehicleNames = [];
+  maintRecords.forEach(function(r) {
+    if (r.vehicleName && vehicleNames.indexOf(r.vehicleName) === -1) {
+      vehicleNames.push(r.vehicleName);
+    }
+  });
 
-  vehicleNames.forEach(vName => {
-    const latest = [...maintRecords]
-      .filter(r => r.vehicleName===vName && r.nextKms)
-      .sort((a,b) => b.createdAt - a.createdAt)[0];
-    if (!latest) return;
-    const curKms = vehicleKms[vName];
+  var overdue = [];
+  var soon = [];
+
+  vehicleNames.forEach(function(vName) {
+    var records = maintRecords
+      .filter(function(r) { return r.vehicleName === vName && r.nextKms; })
+      .sort(function(a,b) { return b.createdAt - a.createdAt; });
+    if (!records.length) return;
+    var latest = records[0];
+    var curKms = vehicleKms[vName];
     if (curKms == null) return;
-    const rem = latest.nextKms - curKms;
-    if (rem <= 0)       overdue.push({ vName, rem, nextKms:latest.nextKms, curKms });
-    else if (rem < 500) soon.push({ vName, rem, nextKms:latest.nextKms, curKms });
+    var rem = latest.nextKms - curKms;
+    if (rem <= 0) overdue.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
+    else if (rem < 500) soon.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
   });
 
   if (!overdue.length && !soon.length) return null;
 
-  let msg = \n🔧 <b>VEHICLE MAINTENANCE</b>\n;
+  var msg = '\n<b>VEHICLE MAINTENANCE</b>\n';
   if (overdue.length) {
-    msg += 🔴 <b>Service Overdue:</b>\n;
-    overdue.forEach(a => {
-      msg += `  • <b>${a.vName}</b> — past due! (Current: ${a.curKms.toLocaleString()} | Next: ${a.nextKms.toLocaleString()} KMS)\n`;
+    msg += 'SERVICE OVERDUE:\n';
+    overdue.forEach(function(a) {
+      msg += '  - <b>' + a.vName + '</b> -- past due! Current: ' + a.curKms + ' Next: ' + a.nextKms + ' KMS\n';
     });
   }
   if (soon.length) {
-    msg += 🟡 <b>Due Soon (&lt;500 KMS):</b>\n;
-    soon.forEach(a => {
-      msg += `  • <b>${a.vName}</b> — only ${a.rem.toLocaleString()} KMS left!\n`;
+    msg += 'DUE SOON (less than 500 KMS):\n';
+    soon.forEach(function(a) {
+      msg += '  - <b>' + a.vName + '</b> -- only ' + a.rem + ' KMS remaining!\n';
     });
   }
-  return { hasAlerts: true, msg };
+  return { hasAlerts: true, msg: msg };
 }
 
-const PROCESSORS = [processTasks, processDocs, processVehicles, processMaintenance];
+// Build full message
+function buildMessage(data, dateStr, isMissed) {
+  var processors = [processTasks, processDocs, processVehicles, processMaintenance];
+  var results = processors.map(function(fn) { return fn(data); }).filter(Boolean);
+  var hasAlerts = results.some(function(r) { return r.hasAlerts; });
 
-// ── Build Message for a Date ─────────────────────────────
-async function buildMessage(data, dateStr, isMissed = false) {
-  const results   = PROCESSORS.map(fn => fn(data)).filter(Boolean);
-  const hasAlerts = results.some(r => r.hasAlerts);
-
-  let msg = '';
+  var msg = '';
   if (isMissed) {
-    msg += ⚠️ <b>MISSED YESTERDAY — Catching up!</b>\n;
-    msg += 📅 <i>${labelDate(dateStr)} (Yesterday)</i>\n;
+    msg += 'MISSED YESTERDAY - Catching up!\n';
+    msg += labelDate(dateStr) + ' (Yesterday)\n';
   } else {
-    msg += 🔔 <b>PS Expense — Daily Report</b>\n;
-    msg += 📅 <i>${labelDate(dateStr)}</i>\n;
+    msg += '<b>PS Expense - Daily Report</b>\n';
+    msg += labelDate(dateStr) + '\n';
   }
-  msg += ━━━━━━━━━━━━━━━━━━━━\n;
+  msg += '--------------------\n';
 
   if (!hasAlerts) {
-    msg += \n✅ <b>ALL CLEAR!</b> Everything is on track today. 👍\n;
+    msg += '\nALL CLEAR! Everything is on track today.\n';
   }
-  results.forEach(r => { msg += r.msg; });
 
-  msg += \n━━━━━━━━━━━━━━━━━━━━\n;
-  msg += isMissed
-    ? <i>📬 Missed reminder catch-up — PS Expense App</i>
-    : <i>⏰ Auto sent 4:00 AM — PS Expense App</i>;
+  results.forEach(function(r) { msg += r.msg; });
+
+  msg += '\n--------------------\n';
+  if (isMissed) {
+    msg += 'Missed reminder catch-up - PS Expense App';
+  } else {
+    msg += 'Auto sent 4:00 AM - PS Expense App';
+  }
   return msg;
 }
 
-// ── Main ─────────────────────────────────────────────────
+// Main
 async function main() {
-  console.log('🔔 PS Expense Telegram Reminder starting...');
+  console.log('PS Expense Telegram Reminder starting...');
 
   if (!USER_UID) {
-    console.error('❌ FIREBASE_USER_UID not set in secrets!');
+    console.error('FIREBASE_USER_UID not set!');
     process.exit(1);
   }
 
-  const today     = todayStr();
-  const yesterday = yesterdayStr();
+  var today     = todayStr();
+  var yesterday = yesterdayStr();
 
-  // ── Read last sent date ──
-  const lastSent = await getLastSentDate();
-  console.log('Last sent date:', lastSent || 'Never');
-  console.log('Today:', today, '| Yesterday:', yesterday);
+  var lastSent = await getLastSentDate();
+  console.log('Last sent:', lastSent || 'Never');
+  console.log('Today:', today);
 
-  // ── Load Firebase data ──
-  let data = {};
+  // Load data from Firebase
+  var data = {};
   try {
-    const snap = await db
+    var snap = await db
       .collection('users').doc(USER_UID)
       .collection('data').doc('appdata')
       .get();
     if (!snap.exists) {
-      await sendTelegram('🔔 <b>PS Expense</b>\n\nNo data found. Open the app and add your data first.');
+      await sendTelegram('<b>PS Expense</b>\n\nNo data found. Open the app first.');
       return;
     }
     data = snap.data();
-    console.log('✅ Data loaded | Tasks:', (data.tasks||[]).length, '| Vehicles:', (data.vehicles||[]).length);
+    console.log('Data loaded. Tasks:', (data.tasks || []).length, 'Vehicles:', (data.vehicles || []).length);
   } catch(e) {
-    console.error('❌ Firebase error:', e.message);
-    await sendTelegram(🔔 <b>PS Expense</b>\n\n❌ Could not read data.\nError: ${e.message});
+    console.error('Firebase error:', e.message);
+    await sendTelegram('<b>PS Expense</b>\n\nCould not read Firebase data.\nError: ' + e.message);
     process.exit(1);
   }
 
-  // ── Check if yesterday was missed ──
-  const missedYesterday = lastSent && lastSent !== yesterday && lastSent !== today;
+  // Check if yesterday was missed
+  var missedYesterday = lastSent && lastSent !== yesterday && lastSent !== today;
 
   try {
-    // Send missed day first (if applicable)
+    // Send missed day first if needed
     if (missedYesterday) {
-      console.log('📬 Sending missed yesterday message...');
-      const missedMsg = await buildMessage(data, yesterday, true);
+      console.log('Sending missed yesterday message...');
+      var missedMsg = buildMessage(data, yesterday, true);
       await sendTelegram(missedMsg);
-      // Small delay between messages
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(function(r) { setTimeout(r, 2000); });
     }
 
-    // Send today's message
-    console.log('📤 Sending today message...');
-    const todayMsg = await buildMessage(data, today, false);
+    // Send today message
+    console.log('Sending today message...');
+    var todayMsg = buildMessage(data, today, false);
     await sendTelegram(todayMsg);
 
     // Save today as last sent
     await saveLastSentDate(today);
-    console.log('✅ All done!');
+    console.log('All done!');
 
   } catch(e) {
-    console.error('❌ Send failed:', e.message);
+    console.error('Send failed:', e.message);
     process.exit(1);
   }
 
