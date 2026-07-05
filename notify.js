@@ -315,7 +315,7 @@ function buildMessage(data, dateStr, isMissed) {
   if (isMissed) {
     msg += 'Missed reminder catch-up - PS Expense App';
   } else {
-    msg += 'Auto sent 4:00 AM - PS Expense App';
+    msg += 'PS App';
   }
   return msg;
 }
