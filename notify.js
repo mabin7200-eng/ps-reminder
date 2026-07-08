@@ -40,18 +40,34 @@ async function sendTelegram(message) {
 }
 
 // Date helpers
+function getISTDate(offsetDays) {
+  // IST = UTC + 5 hours 30 minutes
+  var now = new Date();
+  var istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in ms
+  var ist = new Date(now.getTime() + istOffset);
+  if (offsetDays) {
+    ist.setDate(ist.getDate() + offsetDays);
+  }
+  return ist.toISOString().split('T')[0];
+}
+
 function todayStr() {
-  return new Date().toISOString().split('T')[0];
+  return getISTDate(0);
 }
 
 function yesterdayStr() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d.toISOString().split('T')[0];
+  return getISTDate(-1);
 }
 
 function labelDate(dateStr) {
-  return new Date(dateStr).toLocaleDateString('en-IN', {
+  // Parse date string as IST date (add T00:00:00+05:30)
+  var parts = dateStr.split('-');
+  var d = new Date(
+    parseInt(parts[0]),
+    parseInt(parts[1]) - 1,
+    parseInt(parts[2])
+  );
+  return d.toLocaleDateString('en-IN', {
     weekday:'long', day:'numeric', month:'long', year:'numeric'
   });
 }
@@ -315,7 +331,7 @@ function buildMessage(data, dateStr, isMissed) {
   if (isMissed) {
     msg += 'Missed reminder catch-up - PS Expense App';
   } else {
-    msg += 'PS App';
+    msg += 'Auto sent 4:00 AM - PS Expense App';
   }
   return msg;
 }
@@ -334,7 +350,8 @@ async function main() {
 
   var lastSent = await getLastSentDate();
   console.log('Last sent:', lastSent || 'Never');
-  console.log('Today:', today);
+  console.log('Today (IST):', today);
+  console.log('Yesterday (IST):', yesterday);
 
   // Load data from Firebase
   var data = {};
