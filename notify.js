@@ -78,25 +78,50 @@ function labelDate(dateStr) {
   });
 }
 
+function getISTNow() {
+  // Returns current date/time adjusted to IST (UTC+5:30)
+  var now = new Date();
+  var istOffset = 5.5 * 60 * 60 * 1000;
+  return new Date(now.getTime() + istOffset);
+}
+
+function parseDateIST(dateStr) {
+  // Parse YYYY-MM-DD as IST midnight (not UTC midnight)
+  if (!dateStr) return null;
+  var parts = dateStr.split('-');
+  // Create date in IST by setting as UTC then adjusting
+  var d = new Date(Date.UTC(
+    parseInt(parts[0]),
+    parseInt(parts[1]) - 1,
+    parseInt(parts[2]),
+    0, 0, 0
+  ));
+  return d;
+}
+
 function daysLeft(dateStr) {
   if (!dateStr) return null;
-  const target = new Date(dateStr);
-  const now    = new Date();
-  target.setHours(0,0,0,0);
-  now.setHours(0,0,0,0);
-  return Math.round((target - now) / 86400000);
+  // Use IST now — midnight IST
+  var istNow   = getISTNow();
+  var nowDate  = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
+  var target   = parseDateIST(dateStr);
+  if (!target) return null;
+  return Math.round((target - nowDate) / 86400000);
 }
 
 function nextDueDate(lastDate, freq) {
   if (!lastDate || !freq) return null;
-  const d = new Date(lastDate);
-  d.setDate(d.getDate() + parseInt(freq));
+  var parts = lastDate.split('-');
+  var d = new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2])));
+  d.setUTCDate(d.getUTCDate() + parseInt(freq));
   return d.toISOString().split('T')[0];
 }
 
 function fmtDate(str) {
   if (!str) return '--';
-  return new Date(str).toLocaleDateString('en-IN', {
+  var parts = str.split('-');
+  var d = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2]));
+  return d.toLocaleDateString('en-IN', {
     day:'numeric', month:'short', year:'numeric'
   });
 }
@@ -411,4 +436,3 @@ async function main() {
 }
 
 main();
-  
