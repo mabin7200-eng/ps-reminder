@@ -18,6 +18,12 @@ const db = admin.firestore();
 
 // Config
 const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
+
+// Reminder Settings defaults
+var RS_DEFAULTS = { fc:30, ins:60, tax:30, pucc:15, passport:90, health:60, task:10, kms:500 };
+var rs = RS_DEFAULTS; // will be overridden from Firebase data
+
+function getRS(key){ return rs[key] || RS_DEFAULTS[key]; }
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const USER_UID  = process.env.FIREBASE_USER_UID;
 
@@ -138,7 +144,7 @@ function processTasks(data) {
     var d = daysLeft(next);
     if (d === null) return;
     if (d < 0) overdue.push({ name: t.name, d: d, next: next, remarks: t.remarks });
-    else if (d <= 10) dueSoon.push({ name: t.name, d: d, next: next, remarks: t.remarks });
+    else if (d <= getRS('task')) dueSoon.push({ name: t.name, d: d, next: next, remarks: t.remarks });
     else upcoming.push({ name: t.name, d: d, next: next });
   });
 
@@ -188,7 +194,7 @@ function processDocs(data) {
     var d = daysLeft(doc.expiry);
     if (d === null) return;
     if (d < 0) expired.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
-    else if (d <= 30) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
+    else if (d <= getRS('passport')) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
   });
 
   if (!expired.length && !expiring.length) return null;
@@ -233,8 +239,9 @@ function processVehicles(data) {
       var d = daysLeft(expiry);
       if (d !== null) {
         var item = { vehicle: v.name, plate: v.plate || '', doc: vd.label, d: d, expiry: expiry };
+        var threshold = getRS(vd.key);
         if (d < 0) expired.push(item);
-        else if (d <= 30) expiring.push(item);
+        else if (d <= threshold) expiring.push(item);
       }
     });
   });
@@ -284,7 +291,7 @@ function processMaintenance(data) {
     if (curKms == null) return;
     var rem = latest.nextKms - curKms;
     if (rem <= 0) overdue.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
-    else if (rem < 500) soon.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
+    else if (rem < getRS('kms')) soon.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
   });
 
   if (!overdue.length && !soon.length) return null;
@@ -366,6 +373,8 @@ async function main() {
     }
     data = snap.data();
     console.log('Data loaded. Tasks:', (data.tasks || []).length, 'Vehicles:', (data.vehicles || []).length);
+    if(data.reminderSettings) rs = Object.assign({}, RS_DEFAULTS, data.reminderSettings);
+    console.log('Reminder settings:', JSON.stringify(rs));
   } catch(e) {
     console.error('Firebase error:', e.message);
     await sendTelegram('<b>PS Expense</b>\n\nCould not read Firebase data.\nError: ' + e.message);
@@ -402,3 +411,4 @@ async function main() {
 }
 
 main();
+  
