@@ -31,3 +31,4 @@ jobs:
           FIREBASE_PRIVATE_KEY:  ${{ secrets.FIREBASE_PRIVATE_KEY }}
           FIREBASE_USER_UID:     ${{ secrets.FIREBASE_USER_UID }}
         run: node notify.js
+
