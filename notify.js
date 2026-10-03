@@ -59,7 +59,8 @@ function cleanParam(text, max) {
 // Tries language "en" first, then "en_US".
 async function sendWhatsApp(params) {
   var url = 'https://graph.facebook.com/v18.0/' + WA_PHONE_ID + '/messages';
-  var languages = ['en', 'en_US'];
+  var isHello = (TEMPLATE_NAME === 'hello_world');   // Meta's built-in test template (no variables)
+  var languages = isHello ? ['en_US'] : ['en', 'en_US'];
   var lastError = null;
   var each = 300;
 
@@ -79,6 +80,8 @@ async function sendWhatsApp(params) {
         }]
       }
     };
+
+    if (isHello) { delete body.template.components; }
 
     var res = await fetch(url, {
       method:  'POST',
