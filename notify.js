@@ -88,6 +88,7 @@ async function sendWhatsApp(params) {
     var data = await res.json();
 
     if (!data.error) {
+      console.log('Meta response:', JSON.stringify(data));
       console.log('WhatsApp sent OK (language ' + languages[i] + '). Message ID:',
         data.messages && data.messages[0] && data.messages[0].id);
       return true;
