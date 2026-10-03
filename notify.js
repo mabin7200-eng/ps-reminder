@@ -1,11 +1,10 @@
-// PS Expense - Daily WhatsApp Reminder via Meta API
+// Daily WhatsApp Reminder via Meta API
 // Runs every day at 4:00 AM IST via GitHub Actions
-// If missed yesterday - catches up and sends both days
+// If yesterday was missed - sends yesterday first, then today
 
 const admin = require('firebase-admin');
 const fetch  = require('node-fetch');
 
-// Firebase Init
 admin.initializeApp({
   credential: admin.credential.cert({
     type:         'service_account',
@@ -16,13 +15,15 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// WhatsApp Config
-// Values come from the app (Reminder Settings -> WhatsApp), with GitHub Secrets as backup
-var WA_TOKEN       = process.env.WA_TOKEN       || '';
-var WA_PHONE_ID    = process.env.WA_PHONE_ID    || '';
-var WA_TO_NUMBER   = process.env.WA_TO_NUMBER   || '';
-var TEMPLATE_NAME  = process.env.WA_TEMPLATE    || 'ps_daily_reminder';
+// WhatsApp settings come from the app (Reminder Settings), GitHub Secrets are backup
+var WA_TOKEN       = process.env.WA_TOKEN     || '';
+var WA_PHONE_ID    = process.env.WA_PHONE_ID  || '';
+var WA_TO_NUMBER   = process.env.WA_TO_NUMBER || '';
+var TEMPLATE_NAME  = process.env.WA_TEMPLATE  || 'ps_daily_reminder';
 const USER_UID     = process.env.FIREBASE_USER_UID;
+
+// Old single-variable template. Any other template name uses the 5-variable layout.
+var LEGACY_TEMPLATES = ['ps_daily_reminder'];
 
 async function loadWaConfig() {
   try {
@@ -33,7 +34,7 @@ async function loadWaConfig() {
       if (cfg.phoneId)  WA_PHONE_ID   = cfg.phoneId;
       if (cfg.toNumber) WA_TO_NUMBER  = cfg.toNumber;
       if (cfg.template) TEMPLATE_NAME = cfg.template;
-      console.log('WhatsApp settings loaded from app');
+      console.log('WhatsApp settings loaded from app. Template:', TEMPLATE_NAME);
     } else {
       console.log('No WhatsApp settings in app - using GitHub Secrets if present');
     }
@@ -42,23 +43,25 @@ async function loadWaConfig() {
   }
 }
 
-// Meta rejects template parameters containing newlines, tabs or 4+ spaces in a row
-function cleanParam(text) {
+// Meta rejects template variables containing newlines, tabs or 4+ spaces in a row
+function cleanParam(text, max) {
   var t = String(text)
     .replace(/[ \t]*\r?\n+[ \t]*/g, ' | ')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/(\|\s*){2,}/g, '| ')
     .trim();
-  if (t.length > 900) t = t.slice(0, 897) + '...';
+  if (!t) t = '-';
+  if (t.length > max) t = t.slice(0, max - 3) + '...';
   return t;
 }
 
-// Send WhatsApp message via Meta API
-// Tries language "en" first, then "en_US" (templates created as "English (US)" use en_US)
-async function sendWhatsApp(messageText) {
+// Send template message. params = array of strings, one per {{n}} in the template.
+// Tries language "en" first, then "en_US".
+async function sendWhatsApp(params) {
   var url = 'https://graph.facebook.com/v18.0/' + WA_PHONE_ID + '/messages';
   var languages = ['en', 'en_US'];
   var lastError = null;
+  var each = 300;
 
   for (var i = 0; i < languages.length; i++) {
     var body = {
@@ -70,17 +73,16 @@ async function sendWhatsApp(messageText) {
         language: { code: languages[i] },
         components: [{
           type: 'body',
-          parameters: [{ type: 'text', text: cleanParam(messageText) }]
+          parameters: params.map(function (p) {
+            return { type: 'text', text: cleanParam(p, params.length === 1 ? 900 : each) };
+          })
         }]
       }
     };
 
     var res = await fetch(url, {
       method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + WA_TOKEN,
-        'Content-Type':  'application/json'
-      },
+      headers: { 'Authorization': 'Bearer ' + WA_TOKEN, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     var data = await res.json();
@@ -90,9 +92,7 @@ async function sendWhatsApp(messageText) {
         data.messages && data.messages[0] && data.messages[0].id);
       return true;
     }
-
     lastError = data.error;
-    // 132001 = template not found in this language -> try the next language code
     if (data.error.code === 132001 && i < languages.length - 1) {
       console.log('Template not found in ' + languages[i] + ', trying ' + languages[i + 1] + '...');
       continue;
@@ -102,249 +102,169 @@ async function sendWhatsApp(messageText) {
   throw new Error('WhatsApp error: ' + JSON.stringify(lastError));
 }
 
-// Date helpers - IST aware
+// ---------- IST date helpers ----------
 function getISTNow() {
-  var now = new Date();
-  var istOffset = 5.5 * 60 * 60 * 1000;
-  return new Date(now.getTime() + istOffset);
+  return new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
 }
-
+function pad2(n) { return String(n).padStart(2, '0'); }
 function todayStr() {
-  var ist = getISTNow();
-  return ist.getUTCFullYear() + '-' +
-    String(ist.getUTCMonth() + 1).padStart(2,'0') + '-' +
-    String(ist.getUTCDate()).padStart(2,'0');
+  var d = getISTNow();
+  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
 }
-
 function yesterdayStr() {
-  var ist = getISTNow();
-  ist.setUTCDate(ist.getUTCDate() - 1);
-  return ist.getUTCFullYear() + '-' +
-    String(ist.getUTCMonth() + 1).padStart(2,'0') + '-' +
-    String(ist.getUTCDate()).padStart(2,'0');
+  var d = getISTNow();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
 }
-
 function labelDate(dateStr) {
-  var parts = dateStr.split('-');
-  var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-  return d.toLocaleDateString('en-IN', {
-    weekday:'long', day:'numeric', month:'long', year:'numeric'
-  });
+  var p = dateStr.split('-');
+  return new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]))
+    .toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
-
 function parseDateIST(dateStr) {
   if (!dateStr) return null;
-  var parts = dateStr.split('-');
-  return new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2])));
+  var p = dateStr.split('-');
+  return new Date(Date.UTC(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2])));
 }
-
 function daysLeft(dateStr) {
   if (!dateStr) return null;
-  var istNow  = getISTNow();
-  var nowDate = new Date(Date.UTC(
-    istNow.getUTCFullYear(),
-    istNow.getUTCMonth(),
-    istNow.getUTCDate()
-  ));
+  var n = getISTNow();
+  var nowDate = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()));
   var target = parseDateIST(dateStr);
   if (!target) return null;
   return Math.round((target - nowDate) / 86400000);
 }
-
 function nextDueDate(lastDate, freq) {
   if (!lastDate || !freq) return null;
-  var parts = lastDate.split('-');
-  var d = new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2])));
+  var p = lastDate.split('-');
+  var d = new Date(Date.UTC(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2])));
   d.setUTCDate(d.getUTCDate() + parseInt(freq));
   return d.toISOString().split('T')[0];
 }
+function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+function when(d) { return d === 0 ? 'today' : d === 1 ? 'tomorrow' : 'in ' + plural(d, 'day'); }
 
-function fmtDate(str) {
-  if (!str) return '--';
-  var parts = str.split('-');
-  var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-  return d.toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' });
-}
-
-// Reminder settings defaults
-var RS_DEFAULTS = { fc:30, ins:60, tax:30, pucc:15, passport:90, health:60, task:10, kms:500 };
+// ---------- Reminder settings (days before) ----------
+var RS_DEFAULTS = { fc: 30, ins: 60, tax: 30, pucc: 15, passport: 90, health: 60, task: 10, kms: 500 };
 var rs = RS_DEFAULTS;
 function getRS(key) { return rs[key] || RS_DEFAULTS[key]; }
 
-// Last sent date
+// ---------- Last sent tracking ----------
 async function getLastSentDate() {
   try {
     var snap = await db.collection('users').doc(USER_UID).collection('data').doc('reminderMeta').get();
-    if (snap.exists) return snap.data().lastSentDate || null;
-    return null;
-  } catch(e) { console.log('Could not read lastSentDate:', e.message); return null; }
+    return snap.exists ? (snap.data().lastSentDate || null) : null;
+  } catch (e) { console.log('Could not read lastSentDate:', e.message); return null; }
 }
-
 async function saveLastSentDate(dateStr) {
   try {
     await db.collection('users').doc(USER_UID).collection('data').doc('reminderMeta')
       .set({ lastSentDate: dateStr, sentAt: new Date().toISOString() }, { merge: true });
     console.log('Saved lastSentDate:', dateStr);
-  } catch(e) { console.log('Could not save lastSentDate:', e.message); }
+  } catch (e) { console.log('Could not save lastSentDate:', e.message); }
 }
 
-// Section processors
-function processTasks(data) {
-  var tasks = data.tasks || [];
-  if (!tasks.length) return null;
-  var overdue = [], dueSoon = [], upcoming = [];
-  tasks.forEach(function(t) {
+// ---------- Sections: each returns an array of short lines with icons ----------
+function taskLines(data) {
+  var out = [];
+  (data.tasks || []).forEach(function (t) {
     if (!t.lastDate || !t.freq) return;
-    var next = nextDueDate(t.lastDate, t.freq);
-    var d = daysLeft(next);
+    var d = daysLeft(nextDueDate(t.lastDate, t.freq));
     if (d === null) return;
-    if (d < 0) overdue.push({ name: t.name, d: d, next: next, remarks: t.remarks });
-    else if (d <= getRS('task')) dueSoon.push({ name: t.name, d: d, next: next });
-    else upcoming.push({ name: t.name, d: d });
+    if (d < 0) out.push({ d: d, text: '🔴 ' + t.name + ' - overdue ' + plural(Math.abs(d), 'day') });
+    else if (d <= getRS('task')) out.push({ d: d, text: '🟡 ' + t.name + ' - ' + when(d) });
   });
-  [overdue, dueSoon, upcoming].forEach(function(a){ a.sort(function(x,y){ return x.d - y.d; }); });
-  var hasAlerts = overdue.length > 0 || dueSoon.length > 0;
-  var msg = '\n--- TASK REMINDERS ---\n';
-  if (overdue.length) {
-    msg += 'OVERDUE:\n';
-    overdue.forEach(function(t) {
-      msg += '  * ' + t.name + ' - ' + Math.abs(t.d) + ' days overdue\n';
-      if (t.remarks) msg += '    Note: ' + t.remarks + '\n';
-    });
-  }
-  if (dueSoon.length) {
-    msg += 'DUE SOON:\n';
-    dueSoon.forEach(function(t) {
-      var label = t.d === 0 ? 'TODAY' : t.d === 1 ? 'Tomorrow' : 'in ' + t.d + ' days';
-      msg += '  * ' + t.name + ' - ' + label + ' (' + fmtDate(t.next) + ')\n';
-    });
-  }
-  if (!hasAlerts) msg += '  All tasks on track!\n';
-  if (upcoming.length) {
-    msg += 'Upcoming: ' + upcoming.slice(0,3).map(function(t){ return t.name + ' (' + t.d + 'd)'; }).join(', ') + '\n';
-  }
-  return { hasAlerts: hasAlerts, msg: msg };
+  return out.sort(function (a, b) { return a.d - b.d; }).map(function (x) { return x.text; });
 }
 
-function processDocs(data) {
-  var docs = data.docs || [];
-  var expiryTypes = ['Passport', 'Health Insurance'];
-  var relevant = docs.filter(function(d){ return expiryTypes.indexOf(d.type) !== -1 && d.expiry; });
-  if (!relevant.length) return null;
-  var expired = [], expiring = [];
-  relevant.forEach(function(doc) {
+function docLines(data) {
+  var out = [];
+  (data.docs || []).forEach(function (doc) {
+    if (['Passport', 'Health Insurance'].indexOf(doc.type) === -1 || !doc.expiry) return;
     var d = daysLeft(doc.expiry);
     if (d === null) return;
-    var threshold = doc.type === 'Passport' ? getRS('passport') : getRS('health');
-    if (d < 0) expired.push({ name: doc.name, type: doc.type, d: d });
-    else if (d <= threshold) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
+    var limit = doc.type === 'Passport' ? getRS('passport') : getRS('health');
+    var label = doc.name + ' ' + doc.type;
+    if (d < 0) out.push({ d: d, text: '🔴 ' + label + ' - expired ' + plural(Math.abs(d), 'day') + ' ago' });
+    else if (d <= limit) out.push({ d: d, text: '🟡 ' + label + ' - ' + when(d) });
   });
-  if (!expired.length && !expiring.length) return null;
-  var msg = '\n--- DOCUMENT EXPIRY ---\n';
-  if (expired.length) {
-    msg += 'EXPIRED:\n';
-    expired.forEach(function(d){ msg += '  * ' + d.name + ' ' + d.type + ' - expired ' + Math.abs(d.d) + ' days ago!\n'; });
-  }
-  if (expiring.length) {
-    msg += 'EXPIRING SOON:\n';
-    expiring.forEach(function(d) {
-      var label = d.d === 0 ? 'TODAY' : d.d === 1 ? 'Tomorrow' : 'in ' + d.d + ' days';
-      msg += '  * ' + d.name + ' ' + d.type + ' - ' + label + ' (' + fmtDate(d.expiry) + ')\n';
-    });
-  }
-  return { hasAlerts: true, msg: msg };
+  return out.sort(function (a, b) { return a.d - b.d; }).map(function (x) { return x.text; });
 }
 
-function processVehicles(data) {
-  var vehicles = data.vehicles || [];
-  if (!vehicles.length) return null;
-  var vDocs = [
-    { key:'fc', label:'FC' }, { key:'ins', label:'Insurance' },
-    { key:'tax', label:'Road Tax' }, { key:'pucc', label:'PUCC' }
-  ];
-  var expired = [], expiring = [];
-  vehicles.forEach(function(v) {
-    vDocs.forEach(function(vd) {
-      if (v[vd.key + '_none']) return;
-      var expiry = v[vd.key + '_expiry'];
-      if (!expiry) return;
-      var d = daysLeft(expiry);
-      var threshold = getRS(vd.key);
-      if (d !== null) {
-        var item = { vehicle: v.name, plate: v.plate || '', doc: vd.label, d: d, expiry: expiry };
-        if (d < 0) expired.push(item);
-        else if (d <= threshold) expiring.push(item);
-      }
+function vehicleLines(data) {
+  var keys = [{ key: 'fc', label: 'FC' }, { key: 'ins', label: 'Insurance' },
+              { key: 'tax', label: 'Road Tax' }, { key: 'pucc', label: 'PUCC' }];
+  var out = [];
+  (data.vehicles || []).forEach(function (v) {
+    keys.forEach(function (k) {
+      if (v[k.key + '_none']) return;
+      var exp = v[k.key + '_expiry'];
+      if (!exp) return;
+      var d = daysLeft(exp);
+      if (d === null) return;
+      var who = v.name + (v.plate ? ' (' + v.plate + ')' : '') + ' ' + k.label;
+      if (d < 0) out.push({ d: d, text: '🔴 ' + who + ' - expired ' + plural(Math.abs(d), 'day') + ' ago' });
+      else if (d <= getRS(k.key)) out.push({ d: d, text: '🟡 ' + who + ' - ' + when(d) });
     });
   });
-  if (!expired.length && !expiring.length) return null;
-  var msg = '\n--- VEHICLE DOCUMENTS ---\n';
-  if (expired.length) {
-    msg += 'EXPIRED:\n';
-    expired.forEach(function(a){ msg += '  * ' + a.vehicle + (a.plate ? ' (' + a.plate + ')' : '') + ' - ' + a.doc + ' expired ' + Math.abs(a.d) + ' days ago!\n'; });
-  }
-  if (expiring.length) {
-    msg += 'EXPIRING SOON:\n';
-    expiring.forEach(function(a) {
-      var label = a.d === 0 ? 'TODAY' : a.d === 1 ? 'Tomorrow' : 'in ' + a.d + ' days';
-      msg += '  * ' + a.vehicle + (a.plate ? ' (' + a.plate + ')' : '') + ' - ' + a.doc + ' ' + label + '\n';
-    });
-  }
-  return { hasAlerts: true, msg: msg };
+  return out.sort(function (a, b) { return b.d < 0 && a.d < 0 ? b.d - a.d : a.d - b.d; })
+            .map(function (x) { return x.text; });
 }
 
-function processMaintenance(data) {
-  var maintRecords = data.maintRecords || [];
-  var vehicleKms   = data.vehicleKms   || {};
-  if (!maintRecords.length) return null;
-  var vehicleNames = [];
-  maintRecords.forEach(function(r) {
-    if (r.vehicleName && vehicleNames.indexOf(r.vehicleName) === -1) vehicleNames.push(r.vehicleName);
+function serviceLines(data) {
+  var recs = data.maintRecords || [];
+  var kms = data.vehicleKms || {};
+  var names = [];
+  recs.forEach(function (r) { if (r.vehicleName && names.indexOf(r.vehicleName) === -1) names.push(r.vehicleName); });
+  var out = [];
+  names.forEach(function (vName) {
+    var list = recs.filter(function (r) { return r.vehicleName === vName && r.nextKms; })
+                   .sort(function (a, b) { return b.createdAt - a.createdAt; });
+    if (!list.length || kms[vName] == null) return;
+    var rem = list[0].nextKms - kms[vName];
+    if (rem <= 0) out.push({ rem: rem, text: '🔴 ' + vName + ' - service overdue (due at ' + list[0].nextKms + ' KMS)' });
+    else if (rem < getRS('kms')) out.push({ rem: rem, text: '🟡 ' + vName + ' - only ' + rem + ' KMS left' });
   });
-  var overdue = [], soon = [];
-  vehicleNames.forEach(function(vName) {
-    var records = maintRecords.filter(function(r){ return r.vehicleName === vName && r.nextKms; }).sort(function(a,b){ return b.createdAt - a.createdAt; });
-    if (!records.length) return;
-    var curKms = vehicleKms[vName];
-    if (curKms == null) return;
-    var rem = records[0].nextKms - curKms;
-    if (rem <= 0) overdue.push({ vName: vName, rem: rem, nextKms: records[0].nextKms, curKms: curKms });
-    else if (rem < getRS('kms')) soon.push({ vName: vName, rem: rem, nextKms: records[0].nextKms, curKms: curKms });
-  });
-  if (!overdue.length && !soon.length) return null;
-  var msg = '\n--- VEHICLE MAINTENANCE ---\n';
-  if (overdue.length) {
-    msg += 'SERVICE OVERDUE:\n';
-    overdue.forEach(function(a){ msg += '  * ' + a.vName + ' - past due! Current: ' + a.curKms + ' Next: ' + a.nextKms + ' KMS\n'; });
-  }
-  if (soon.length) {
-    msg += 'DUE SOON (less than ' + getRS('kms') + ' KMS):\n';
-    soon.forEach(function(a){ msg += '  * ' + a.vName + ' - only ' + a.rem + ' KMS remaining!\n'; });
-  }
-  return { hasAlerts: true, msg: msg };
+  return out.sort(function (a, b) { return a.rem - b.rem; }).map(function (x) { return x.text; });
 }
 
-var PROCESSORS = [processTasks, processDocs, processVehicles, processMaintenance];
-
-function buildMessage(data, dateStr, isMissed) {
-  var results   = PROCESSORS.map(function(fn){ return fn(data); }).filter(Boolean);
-  var hasAlerts = results.some(function(r){ return r.hasAlerts; });
-  var msg = '';
-  if (isMissed) {
-    msg += 'MISSED YESTERDAY - Catching up!\n' + labelDate(dateStr) + ' (Yesterday)\n';
-  } else {
-    msg += 'PS Expense - Daily Report\n' + labelDate(dateStr) + '\n';
+function joinLines(lines, max) {
+  if (!lines.length) return '✅ All clear';
+  max = max || 280;
+  var out = '';
+  for (var i = 0; i < lines.length; i++) {
+    var next = out ? out + ' | ' + lines[i] : lines[i];
+    if (next.length > max && i > 0) {
+      return out + ' | +' + (lines.length - i) + ' more';
+    }
+    out = next;
   }
-  msg += '====================\n';
-  if (!hasAlerts) msg += '\nALL CLEAR! Everything on track today.\n';
-  results.forEach(function(r){ msg += r.msg; });
-  msg += '\n====================\n';
-  msg += isMissed ? 'Missed reminder catch-up' : 'Auto sent 4:00 AM - PS Expense';
-  return msg;
+  return out;
+}
+
+// Build the message pieces for one day
+function buildSections(data, dateStr, isMissed) {
+  return {
+    date:     (isMissed ? 'Yesterday, ' : '') + labelDate(dateStr),
+    tasks:    joinLines(taskLines(data)),
+    docs:     joinLines(docLines(data)),
+    vehicles: joinLines(vehicleLines(data)),
+    service:  joinLines(serviceLines(data))
+  };
+}
+
+// Turn the pieces into template variables
+function buildParams(s) {
+  if (LEGACY_TEMPLATES.indexOf(TEMPLATE_NAME) !== -1) {
+    // Old template has one variable, so everything goes in one line
+    return ['📅 ' + s.date + ' | 🔔 Tasks: ' + s.tasks + ' | 🗂️ Documents: ' + s.docs +
+            ' | 🚗 Vehicle papers: ' + s.vehicles + ' | 🔧 Service: ' + s.service];
+  }
+  return [s.date, s.tasks, s.docs, s.vehicles, s.service];
 }
 
 async function main() {
-  console.log('PS Expense WhatsApp Reminder starting...');
+  console.log('WhatsApp Reminder starting...');
   if (!USER_UID) { console.error('FIREBASE_USER_UID not set!'); process.exit(1); }
   await loadWaConfig();
   if (!WA_TOKEN || !WA_PHONE_ID || !WA_TO_NUMBER) {
@@ -352,24 +272,23 @@ async function main() {
     process.exit(1);
   }
 
-  var today     = todayStr();
+  var today = todayStr();
   var yesterday = yesterdayStr();
-  var lastSent  = await getLastSentDate();
+  var lastSent = await getLastSentDate();
   console.log('Today (IST):', today, '| Yesterday:', yesterday, '| Last sent:', lastSent || 'Never');
 
   var data = {};
   try {
     var snap = await db.collection('users').doc(USER_UID).collection('data').doc('appdata').get();
     if (!snap.exists) {
-      await sendWhatsApp('PS Expense: No data found. Open the app first.');
+      await sendWhatsApp(['No data found. Open the app first.']);
       return;
     }
     data = snap.data();
     if (data.reminderSettings) rs = Object.assign({}, RS_DEFAULTS, data.reminderSettings);
-    console.log('Data loaded. Tasks:', (data.tasks||[]).length, '| Settings:', JSON.stringify(rs));
-  } catch(e) {
+    console.log('Data loaded. Tasks:', (data.tasks || []).length, '| Settings:', JSON.stringify(rs));
+  } catch (e) {
     console.error('Firebase error:', e.message);
-    await sendWhatsApp('PS Expense: Could not read Firebase. Error: ' + e.message);
     process.exit(1);
   }
 
@@ -378,18 +297,19 @@ async function main() {
   try {
     if (missedYesterday) {
       console.log('Sending missed yesterday...');
-      await sendWhatsApp(buildMessage(data, yesterday, true));
-      await new Promise(function(r){ setTimeout(r, 3000); });
+      await sendWhatsApp(buildParams(buildSections(data, yesterday, true)));
+      await new Promise(function (r) { setTimeout(r, 3000); });
     }
     console.log('Sending today...');
-    await sendWhatsApp(buildMessage(data, today, false));
+    await sendWhatsApp(buildParams(buildSections(data, today, false)));
     await saveLastSentDate(today);
     console.log('All done!');
-  } catch(e) {
+  } catch (e) {
     console.error('Send failed:', e.message);
     process.exit(1);
   }
   process.exit(0);
 }
 
-main();
+if (require.main === module) { main(); }
+module.exports = { buildSections: buildSections, buildParams: buildParams, cleanParam: cleanParam };
