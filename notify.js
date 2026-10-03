@@ -28,9 +28,9 @@ var PLAIN = false;
 function plainText(t) {
   return String(t)
     .replace(/\|/g, ',')
-    .replace(/[^\x20-\x7E]/g, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/(,\s*){2,}/g, ', ')
+    .replace(/[^\x20-\x7E\n]/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/(,[ \t]*){2,}/g, ', ')
     .trim() || '-';
 }
 
@@ -56,12 +56,16 @@ async function loadWaConfig() {
 }
 
 // Meta rejects template variables containing newlines, tabs or 4+ spaces in a row
-function cleanParam(text, max) {
-  var t = String(text)
-    .replace(/[ \t]*\r?\n+[ \t]*/g, ' | ')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/(\|\s*){2,}/g, '| ')
-    .trim();
+function cleanParam(text, max, keepNl) {
+  var t = String(text);
+  if (keepNl) {
+    t = t.replace(/[ \t]+/g, ' ').replace(/ ?\r?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  } else {
+    t = t.replace(/[ \t]*\r?\n+[ \t]*/g, ' | ')
+         .replace(/[ \t]{2,}/g, ' ')
+         .replace(/(\|\s*){2,}/g, '| ')
+         .trim();
+  }
   if (!t) t = '-';
   if (t.length > max) t = t.slice(0, max - 3) + '...';
   return t;
@@ -69,7 +73,7 @@ function cleanParam(text, max) {
 
 // Send template message. params = array of strings, one per {{n}} in the template.
 // Tries language "en" first, then "en_US".
-async function sendWhatsApp(params) {
+async function sendWhatsApp(params, keepNl) {
   var url = 'https://graph.facebook.com/v18.0/' + WA_PHONE_ID + '/messages';
   var isHello = (TEMPLATE_NAME === 'hello_world');   // Meta's built-in test template (no variables)
   var languages = isHello ? ['en_US'] : ['en', 'en_US'];
@@ -87,7 +91,7 @@ async function sendWhatsApp(params) {
         components: [{
           type: 'body',
           parameters: params.map(function (p) {
-            return { type: 'text', text: cleanParam(PLAIN ? plainText(p) : p, params.length === 1 ? 900 : each) };
+            return { type: 'text', text: cleanParam(PLAIN ? plainText(p) : p, params.length === 1 ? 900 : each, keepNl) };
           })
         }]
       }
@@ -244,14 +248,16 @@ function serviceLines(data) {
   return out.sort(function (a, b) { return a.rem - b.rem; }).map(function (x) { return x.text; });
 }
 
-function joinLines(lines, max) {
+function joinLines(lines, max, sep) {
   if (!lines.length) return '✅ All clear';
   max = max || 280;
+  sep = sep || ' | ';
   var out = '';
   for (var i = 0; i < lines.length; i++) {
-    var next = out ? out + ' | ' + lines[i] : lines[i];
+    var item = (i + 1) + '. ' + lines[i];          // numbered: 1. 2. 3. ...
+    var next = out ? out + sep + item : item;
     if (next.length > max && i > 0) {
-      return out + ' | +' + (lines.length - i) + ' more';
+      return out + sep + '+' + (lines.length - i) + ' more';
     }
     out = next;
   }
@@ -259,24 +265,41 @@ function joinLines(lines, max) {
 }
 
 // Build the message pieces for one day
-function buildSections(data, dateStr, isMissed) {
+function buildSections(data, dateStr, isMissed, multi) {
+  var sep = multi ? '\n' : ' | ';
   return {
     date:     (isMissed ? 'Yesterday, ' : '') + labelDate(dateStr),
-    tasks:    joinLines(taskLines(data)),
-    docs:     joinLines(docLines(data)),
-    vehicles: joinLines(vehicleLines(data)),
-    service:  joinLines(serviceLines(data))
+    tasks:    joinLines(taskLines(data), 280, sep),
+    docs:     joinLines(docLines(data), 280, sep),
+    vehicles: joinLines(vehicleLines(data), 280, sep),
+    service:  joinLines(serviceLines(data), 280, sep)
   };
 }
 
 // Turn the pieces into template variables
-function buildParams(s) {
+function buildParams(s, multi) {
   if (LEGACY_TEMPLATES.indexOf(TEMPLATE_NAME) !== -1) {
+    if (multi) {
+      return ['📅 ' + s.date + '\n\n🔔 TASKS\n' + s.tasks + '\n\n🗂️ DOCUMENTS\n' + s.docs +
+              '\n\n🚗 VEHICLE PAPERS\n' + s.vehicles + '\n\n🔧 SERVICE\n' + s.service];
+    }
     // Old template has one variable, so everything goes in one line
     return ['📅 ' + s.date + ' | 🔔 Tasks: ' + s.tasks + ' | 🗂️ Documents: ' + s.docs +
             ' | 🚗 Vehicle papers: ' + s.vehicles + ' | 🔧 Service: ' + s.service];
   }
   return [s.date, s.tasks, s.docs, s.vehicles, s.service];
+}
+
+// Try real line breaks first. If Meta rejects them, send the single-line version instead.
+async function sendDay(data, dateStr, isMissed) {
+  try {
+    await sendWhatsApp(buildParams(buildSections(data, dateStr, isMissed, true), true), true);
+    return;
+  } catch (e) {
+    if (!/132018|132000|132012|format/i.test(e.message)) throw e;
+    console.log('Meta did not accept line breaks - sending single-line version instead');
+  }
+  await sendWhatsApp(buildParams(buildSections(data, dateStr, isMissed, false), false), false);
 }
 
 async function main() {
@@ -322,11 +345,11 @@ async function main() {
   try {
     if (missedYesterday) {
       console.log('Sending missed yesterday...');
-      await sendWhatsApp(buildParams(buildSections(data, yesterday, true)));
+      await sendDay(data, yesterday, true);
       await new Promise(function (r) { setTimeout(r, 3000); });
     }
     console.log('Sending today...');
-    await sendWhatsApp(buildParams(buildSections(data, today, false)));
+    await sendDay(data, today, false);
     await saveLastSentDate(today);
     console.log('All done!');
   } catch (e) {
@@ -337,4 +360,4 @@ async function main() {
 }
 
 if (require.main === module) { main(); }
-module.exports = { buildSections: buildSections, buildParams: buildParams, cleanParam: cleanParam };
+module.exports = { buildSections: buildSections, buildParams: buildParams, cleanParam: cleanParam, sendDay: sendDay };
