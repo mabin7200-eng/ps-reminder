@@ -273,6 +273,10 @@ async function main() {
     process.exit(1);
   }
 
+  console.log('Sending FROM phone number ID:', WA_PHONE_ID,
+    '| TO: ending ' + String(WA_TO_NUMBER).slice(-4),
+    '| Template:', TEMPLATE_NAME);
+
   var today = todayStr();
   var yesterday = yesterdayStr();
   var lastSent = await getLastSentDate();
