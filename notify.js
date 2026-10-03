@@ -22,6 +22,18 @@ var WA_TO_NUMBER   = process.env.WA_TO_NUMBER || '';
 var TEMPLATE_NAME  = process.env.WA_TEMPLATE  || 'ps_daily_reminder';
 const USER_UID     = process.env.FIREBASE_USER_UID;
 
+// Test switch: add ":plain" after the template name in the app (e.g. ps_daily_reminder:plain)
+// to send the same message with no emojis or special characters.
+var PLAIN = false;
+function plainText(t) {
+  return String(t)
+    .replace(/\|/g, ',')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/(,\s*){2,}/g, ', ')
+    .trim() || '-';
+}
+
 // Old single-variable template. Any other template name uses the 5-variable layout.
 var LEGACY_TEMPLATES = ['ps_daily_reminder'];
 
@@ -75,7 +87,7 @@ async function sendWhatsApp(params) {
         components: [{
           type: 'body',
           parameters: params.map(function (p) {
-            return { type: 'text', text: cleanParam(p, params.length === 1 ? 900 : each) };
+            return { type: 'text', text: cleanParam(PLAIN ? plainText(p) : p, params.length === 1 ? 900 : each) };
           })
         }]
       }
@@ -271,6 +283,11 @@ async function main() {
   console.log('WhatsApp Reminder starting...');
   if (!USER_UID) { console.error('FIREBASE_USER_UID not set!'); process.exit(1); }
   await loadWaConfig();
+  if (/:plain$/.test(TEMPLATE_NAME)) {
+    PLAIN = true;
+    TEMPLATE_NAME = TEMPLATE_NAME.replace(/:plain$/, '');
+    console.log('PLAIN TEST MODE: emojis and special characters removed');
+  }
   if (!WA_TOKEN || !WA_PHONE_ID || !WA_TO_NUMBER) {
     console.error('WhatsApp details missing. Open the app > Menu > Reminder Settings > WhatsApp and save them.');
     process.exit(1);
