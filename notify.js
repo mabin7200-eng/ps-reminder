@@ -1,5 +1,5 @@
-// PS Expense - Daily Telegram Reminder
-// Runs every day at 4:00 AM IST
+// PS Expense - Daily WhatsApp Reminder via Meta API
+// Runs every day at 4:00 AM IST via GitHub Actions
 // If missed yesterday - catches up and sends both days
 
 const admin = require('firebase-admin');
@@ -16,95 +16,125 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// Config
-const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
+// WhatsApp Config
+// Values come from the app (Reminder Settings -> WhatsApp), with GitHub Secrets as backup
+var WA_TOKEN       = process.env.WA_TOKEN       || '';
+var WA_PHONE_ID    = process.env.WA_PHONE_ID    || '';
+var WA_TO_NUMBER   = process.env.WA_TO_NUMBER   || '';
+var TEMPLATE_NAME  = process.env.WA_TEMPLATE    || 'ps_daily_reminder';
+const USER_UID     = process.env.FIREBASE_USER_UID;
 
-// Reminder Settings defaults
-var RS_DEFAULTS = { fc:30, ins:60, tax:30, pucc:15, passport:90, health:60, task:10, kms:500 };
-var rs = RS_DEFAULTS; // will be overridden from Firebase data
+async function loadWaConfig() {
+  try {
+    var snap = await db.collection('users').doc(USER_UID).collection('data').doc('waConfig').get();
+    if (snap.exists) {
+      var cfg = snap.data();
+      if (cfg.token)    WA_TOKEN      = cfg.token;
+      if (cfg.phoneId)  WA_PHONE_ID   = cfg.phoneId;
+      if (cfg.toNumber) WA_TO_NUMBER  = cfg.toNumber;
+      if (cfg.template) TEMPLATE_NAME = cfg.template;
+      console.log('WhatsApp settings loaded from app');
+    } else {
+      console.log('No WhatsApp settings in app - using GitHub Secrets if present');
+    }
+  } catch (e) {
+    console.log('Could not read WhatsApp settings:', e.message);
+  }
+}
 
-function getRS(key){ return rs[key] || RS_DEFAULTS[key]; }
-const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-const USER_UID  = process.env.FIREBASE_USER_UID;
+// Meta rejects template parameters containing newlines, tabs or 4+ spaces in a row
+function cleanParam(text) {
+  var t = String(text)
+    .replace(/[ \t]*\r?\n+[ \t]*/g, ' | ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/(\|\s*){2,}/g, '| ')
+    .trim();
+  if (t.length > 900) t = t.slice(0, 897) + '...';
+  return t;
+}
 
-// Send Telegram message
-async function sendTelegram(message) {
-  const url = 'https://api.telegram.org/bot' + BOT_TOKEN + '/sendMessage';
-  const res = await fetch(url, {
+// Send WhatsApp message via Meta API
+async function sendWhatsApp(messageText) {
+  var url = 'https://graph.facebook.com/v18.0/' + WA_PHONE_ID + '/messages';
+  var body = {
+    messaging_product: 'whatsapp',
+    to: WA_TO_NUMBER,
+    type: 'template',
+    template: {
+      name: TEMPLATE_NAME,
+      language: { code: 'en' },
+      components: [{
+        type: 'body',
+        parameters: [{
+          type: 'text',
+          text: cleanParam(messageText)
+        }]
+      }]
+    }
+  };
+
+  var res = await fetch(url, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id:    CHAT_ID,
-      text:       message,
-      parse_mode: 'HTML',
-    }),
+    headers: {
+      'Authorization': 'Bearer ' + WA_TOKEN,
+      'Content-Type':  'application/json'
+    },
+    body: JSON.stringify(body)
   });
-  const data = await res.json();
-  if (!data.ok) throw new Error('Telegram error: ' + JSON.stringify(data));
-  console.log('Telegram sent OK');
+
+  var data = await res.json();
+  if (data.error) {
+    throw new Error('WhatsApp error: ' + JSON.stringify(data.error));
+  }
+  console.log('WhatsApp sent OK. Message ID:', data.messages && data.messages[0] && data.messages[0].id);
   return true;
 }
 
-// Date helpers
-function getISTDate(offsetDays) {
-  // IST = UTC + 5 hours 30 minutes
-  var now = new Date();
-  var istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in ms
-  var ist = new Date(now.getTime() + istOffset);
-  if (offsetDays) {
-    ist.setDate(ist.getDate() + offsetDays);
-  }
-  return ist.toISOString().split('T')[0];
-}
-
-function todayStr() {
-  return getISTDate(0);
-}
-
-function yesterdayStr() {
-  return getISTDate(-1);
-}
-
-function labelDate(dateStr) {
-  // Parse date string as IST date (add T00:00:00+05:30)
-  var parts = dateStr.split('-');
-  var d = new Date(
-    parseInt(parts[0]),
-    parseInt(parts[1]) - 1,
-    parseInt(parts[2])
-  );
-  return d.toLocaleDateString('en-IN', {
-    weekday:'long', day:'numeric', month:'long', year:'numeric'
-  });
-}
-
+// Date helpers - IST aware
 function getISTNow() {
-  // Returns current date/time adjusted to IST (UTC+5:30)
   var now = new Date();
   var istOffset = 5.5 * 60 * 60 * 1000;
   return new Date(now.getTime() + istOffset);
 }
 
+function todayStr() {
+  var ist = getISTNow();
+  return ist.getUTCFullYear() + '-' +
+    String(ist.getUTCMonth() + 1).padStart(2,'0') + '-' +
+    String(ist.getUTCDate()).padStart(2,'0');
+}
+
+function yesterdayStr() {
+  var ist = getISTNow();
+  ist.setUTCDate(ist.getUTCDate() - 1);
+  return ist.getUTCFullYear() + '-' +
+    String(ist.getUTCMonth() + 1).padStart(2,'0') + '-' +
+    String(ist.getUTCDate()).padStart(2,'0');
+}
+
+function labelDate(dateStr) {
+  var parts = dateStr.split('-');
+  var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+  return d.toLocaleDateString('en-IN', {
+    weekday:'long', day:'numeric', month:'long', year:'numeric'
+  });
+}
+
 function parseDateIST(dateStr) {
-  // Parse YYYY-MM-DD as IST midnight (not UTC midnight)
   if (!dateStr) return null;
   var parts = dateStr.split('-');
-  // Create date in IST by setting as UTC then adjusting
-  var d = new Date(Date.UTC(
-    parseInt(parts[0]),
-    parseInt(parts[1]) - 1,
-    parseInt(parts[2]),
-    0, 0, 0
-  ));
-  return d;
+  return new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2])));
 }
 
 function daysLeft(dateStr) {
   if (!dateStr) return null;
-  // Use IST now — midnight IST
-  var istNow   = getISTNow();
-  var nowDate  = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
-  var target   = parseDateIST(dateStr);
+  var istNow  = getISTNow();
+  var nowDate = new Date(Date.UTC(
+    istNow.getUTCFullYear(),
+    istNow.getUTCMonth(),
+    istNow.getUTCDate()
+  ));
+  var target = parseDateIST(dateStr);
   if (!target) return null;
   return Math.round((target - nowDate) / 86400000);
 }
@@ -112,7 +142,7 @@ function daysLeft(dateStr) {
 function nextDueDate(lastDate, freq) {
   if (!lastDate || !freq) return null;
   var parts = lastDate.split('-');
-  var d = new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2])));
+  var d = new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2])));
   d.setUTCDate(d.getUTCDate() + parseInt(freq));
   return d.toISOString().split('T')[0];
 }
@@ -120,69 +150,53 @@ function nextDueDate(lastDate, freq) {
 function fmtDate(str) {
   if (!str) return '--';
   var parts = str.split('-');
-  var d = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2]));
-  return d.toLocaleDateString('en-IN', {
-    day:'numeric', month:'short', year:'numeric'
-  });
+  var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+  return d.toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' });
 }
 
-// Read last sent date from Firebase
+// Reminder settings defaults
+var RS_DEFAULTS = { fc:30, ins:60, tax:30, pucc:15, passport:90, health:60, task:10, kms:500 };
+var rs = RS_DEFAULTS;
+function getRS(key) { return rs[key] || RS_DEFAULTS[key]; }
+
+// Last sent date
 async function getLastSentDate() {
   try {
-    const snap = await db
-      .collection('users').doc(USER_UID)
-      .collection('data').doc('reminderMeta')
-      .get();
+    var snap = await db.collection('users').doc(USER_UID).collection('data').doc('reminderMeta').get();
     if (snap.exists) return snap.data().lastSentDate || null;
     return null;
-  } catch(e) {
-    console.log('Could not read lastSentDate:', e.message);
-    return null;
-  }
+  } catch(e) { console.log('Could not read lastSentDate:', e.message); return null; }
 }
 
-// Save last sent date to Firebase
 async function saveLastSentDate(dateStr) {
   try {
-    await db
-      .collection('users').doc(USER_UID)
-      .collection('data').doc('reminderMeta')
+    await db.collection('users').doc(USER_UID).collection('data').doc('reminderMeta')
       .set({ lastSentDate: dateStr, sentAt: new Date().toISOString() }, { merge: true });
     console.log('Saved lastSentDate:', dateStr);
-  } catch(e) {
-    console.log('Could not save lastSentDate:', e.message);
-  }
+  } catch(e) { console.log('Could not save lastSentDate:', e.message); }
 }
 
-// Process tasks
+// Section processors
 function processTasks(data) {
-  const tasks = data.tasks || [];
+  var tasks = data.tasks || [];
   if (!tasks.length) return null;
-
-  const overdue = [];
-  const dueSoon = [];
-  const upcoming = [];
-
+  var overdue = [], dueSoon = [], upcoming = [];
   tasks.forEach(function(t) {
     if (!t.lastDate || !t.freq) return;
     var next = nextDueDate(t.lastDate, t.freq);
     var d = daysLeft(next);
     if (d === null) return;
     if (d < 0) overdue.push({ name: t.name, d: d, next: next, remarks: t.remarks });
-    else if (d <= getRS('task')) dueSoon.push({ name: t.name, d: d, next: next, remarks: t.remarks });
-    else upcoming.push({ name: t.name, d: d, next: next });
+    else if (d <= getRS('task')) dueSoon.push({ name: t.name, d: d, next: next });
+    else upcoming.push({ name: t.name, d: d });
   });
-
-  overdue.sort(function(a,b){ return a.d - b.d; });
-  dueSoon.sort(function(a,b){ return a.d - b.d; });
-
+  [overdue, dueSoon, upcoming].forEach(function(a){ a.sort(function(x,y){ return x.d - y.d; }); });
   var hasAlerts = overdue.length > 0 || dueSoon.length > 0;
-  var msg = '\n<b>TASK REMINDERS</b>\n';
-
+  var msg = '\n--- TASK REMINDERS ---\n';
   if (overdue.length) {
     msg += 'OVERDUE:\n';
     overdue.forEach(function(t) {
-      msg += '  - <b>' + t.name + '</b> -- ' + Math.abs(t.d) + ' days overdue\n';
+      msg += '  * ' + t.name + ' - ' + Math.abs(t.d) + ' days overdue\n';
       if (t.remarks) msg += '    Note: ' + t.remarks + '\n';
     });
   }
@@ -190,248 +204,179 @@ function processTasks(data) {
     msg += 'DUE SOON:\n';
     dueSoon.forEach(function(t) {
       var label = t.d === 0 ? 'TODAY' : t.d === 1 ? 'Tomorrow' : 'in ' + t.d + ' days';
-      msg += '  - <b>' + t.name + '</b> -- ' + label + ' (' + fmtDate(t.next) + ')\n';
+      msg += '  * ' + t.name + ' - ' + label + ' (' + fmtDate(t.next) + ')\n';
     });
   }
-  if (!hasAlerts) {
-    msg += '  All tasks on track!\n';
-  }
+  if (!hasAlerts) msg += '  All tasks on track!\n';
   if (upcoming.length) {
-    var upNames = upcoming.slice(0,3).map(function(t){ return t.name + ' (' + t.d + 'd)'; }).join(', ');
-    msg += 'Upcoming: ' + upNames + '\n';
+    msg += 'Upcoming: ' + upcoming.slice(0,3).map(function(t){ return t.name + ' (' + t.d + 'd)'; }).join(', ') + '\n';
   }
   return { hasAlerts: hasAlerts, msg: msg };
 }
 
-// Process documents
 function processDocs(data) {
   var docs = data.docs || [];
   var expiryTypes = ['Passport', 'Health Insurance'];
-  var relevant = docs.filter(function(d) {
-    return expiryTypes.indexOf(d.type) !== -1 && d.expiry;
-  });
+  var relevant = docs.filter(function(d){ return expiryTypes.indexOf(d.type) !== -1 && d.expiry; });
   if (!relevant.length) return null;
-
-  var expired = [];
-  var expiring = [];
-
+  var expired = [], expiring = [];
   relevant.forEach(function(doc) {
     var d = daysLeft(doc.expiry);
     if (d === null) return;
-    if (d < 0) expired.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
-    else if (d <= getRS('passport')) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
+    var threshold = doc.type === 'Passport' ? getRS('passport') : getRS('health');
+    if (d < 0) expired.push({ name: doc.name, type: doc.type, d: d });
+    else if (d <= threshold) expiring.push({ name: doc.name, type: doc.type, d: d, expiry: doc.expiry });
   });
-
   if (!expired.length && !expiring.length) return null;
-
-  var msg = '\n<b>DOCUMENT EXPIRY</b>\n';
+  var msg = '\n--- DOCUMENT EXPIRY ---\n';
   if (expired.length) {
     msg += 'EXPIRED:\n';
-    expired.forEach(function(d) {
-      msg += '  - <b>' + d.name + ' ' + d.type + '</b> -- expired ' + Math.abs(d.d) + ' days ago!\n';
-    });
+    expired.forEach(function(d){ msg += '  * ' + d.name + ' ' + d.type + ' - expired ' + Math.abs(d.d) + ' days ago!\n'; });
   }
   if (expiring.length) {
     msg += 'EXPIRING SOON:\n';
     expiring.forEach(function(d) {
       var label = d.d === 0 ? 'TODAY' : d.d === 1 ? 'Tomorrow' : 'in ' + d.d + ' days';
-      msg += '  - <b>' + d.name + ' ' + d.type + '</b> -- ' + label + ' (' + fmtDate(d.expiry) + ')\n';
+      msg += '  * ' + d.name + ' ' + d.type + ' - ' + label + ' (' + fmtDate(d.expiry) + ')\n';
     });
   }
   return { hasAlerts: true, msg: msg };
 }
 
-// Process vehicles
 function processVehicles(data) {
   var vehicles = data.vehicles || [];
   if (!vehicles.length) return null;
-
   var vDocs = [
-    { key: 'fc',   label: 'FC',        icon: 'FC' },
-    { key: 'ins',  label: 'Insurance', icon: 'INS' },
-    { key: 'tax',  label: 'Road Tax',  icon: 'TAX' },
-    { key: 'pucc', label: 'PUCC',      icon: 'PUCC' },
+    { key:'fc', label:'FC' }, { key:'ins', label:'Insurance' },
+    { key:'tax', label:'Road Tax' }, { key:'pucc', label:'PUCC' }
   ];
-
-  var expired = [];
-  var expiring = [];
-
+  var expired = [], expiring = [];
   vehicles.forEach(function(v) {
     vDocs.forEach(function(vd) {
       if (v[vd.key + '_none']) return;
       var expiry = v[vd.key + '_expiry'];
       if (!expiry) return;
       var d = daysLeft(expiry);
+      var threshold = getRS(vd.key);
       if (d !== null) {
         var item = { vehicle: v.name, plate: v.plate || '', doc: vd.label, d: d, expiry: expiry };
-        var threshold = getRS(vd.key);
         if (d < 0) expired.push(item);
         else if (d <= threshold) expiring.push(item);
       }
     });
   });
-
   if (!expired.length && !expiring.length) return null;
-
-  var msg = '\n<b>VEHICLE DOCUMENTS</b>\n';
+  var msg = '\n--- VEHICLE DOCUMENTS ---\n';
   if (expired.length) {
     msg += 'EXPIRED:\n';
-    expired.forEach(function(a) {
-      msg += '  - <b>' + a.vehicle + '</b> -- ' + a.doc + ' expired ' + Math.abs(a.d) + ' days ago!\n';
-    });
+    expired.forEach(function(a){ msg += '  * ' + a.vehicle + (a.plate ? ' (' + a.plate + ')' : '') + ' - ' + a.doc + ' expired ' + Math.abs(a.d) + ' days ago!\n'; });
   }
   if (expiring.length) {
     msg += 'EXPIRING SOON:\n';
     expiring.forEach(function(a) {
       var label = a.d === 0 ? 'TODAY' : a.d === 1 ? 'Tomorrow' : 'in ' + a.d + ' days';
-      msg += '  - <b>' + a.vehicle + '</b> -- ' + a.doc + ' ' + label + '\n';
+      msg += '  * ' + a.vehicle + (a.plate ? ' (' + a.plate + ')' : '') + ' - ' + a.doc + ' ' + label + '\n';
     });
   }
   return { hasAlerts: true, msg: msg };
 }
 
-// Process maintenance KMS
 function processMaintenance(data) {
   var maintRecords = data.maintRecords || [];
   var vehicleKms   = data.vehicleKms   || {};
   if (!maintRecords.length) return null;
-
   var vehicleNames = [];
   maintRecords.forEach(function(r) {
-    if (r.vehicleName && vehicleNames.indexOf(r.vehicleName) === -1) {
-      vehicleNames.push(r.vehicleName);
-    }
+    if (r.vehicleName && vehicleNames.indexOf(r.vehicleName) === -1) vehicleNames.push(r.vehicleName);
   });
-
-  var overdue = [];
-  var soon = [];
-
+  var overdue = [], soon = [];
   vehicleNames.forEach(function(vName) {
-    var records = maintRecords
-      .filter(function(r) { return r.vehicleName === vName && r.nextKms; })
-      .sort(function(a,b) { return b.createdAt - a.createdAt; });
+    var records = maintRecords.filter(function(r){ return r.vehicleName === vName && r.nextKms; }).sort(function(a,b){ return b.createdAt - a.createdAt; });
     if (!records.length) return;
-    var latest = records[0];
     var curKms = vehicleKms[vName];
     if (curKms == null) return;
-    var rem = latest.nextKms - curKms;
-    if (rem <= 0) overdue.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
-    else if (rem < getRS('kms')) soon.push({ vName: vName, rem: rem, nextKms: latest.nextKms, curKms: curKms });
+    var rem = records[0].nextKms - curKms;
+    if (rem <= 0) overdue.push({ vName: vName, rem: rem, nextKms: records[0].nextKms, curKms: curKms });
+    else if (rem < getRS('kms')) soon.push({ vName: vName, rem: rem, nextKms: records[0].nextKms, curKms: curKms });
   });
-
   if (!overdue.length && !soon.length) return null;
-
-  var msg = '\n<b>VEHICLE MAINTENANCE</b>\n';
+  var msg = '\n--- VEHICLE MAINTENANCE ---\n';
   if (overdue.length) {
     msg += 'SERVICE OVERDUE:\n';
-    overdue.forEach(function(a) {
-      msg += '  - <b>' + a.vName + '</b> -- past due! Current: ' + a.curKms + ' Next: ' + a.nextKms + ' KMS\n';
-    });
+    overdue.forEach(function(a){ msg += '  * ' + a.vName + ' - past due! Current: ' + a.curKms + ' Next: ' + a.nextKms + ' KMS\n'; });
   }
   if (soon.length) {
-    msg += 'DUE SOON (less than 500 KMS):\n';
-    soon.forEach(function(a) {
-      msg += '  - <b>' + a.vName + '</b> -- only ' + a.rem + ' KMS remaining!\n';
-    });
+    msg += 'DUE SOON (less than ' + getRS('kms') + ' KMS):\n';
+    soon.forEach(function(a){ msg += '  * ' + a.vName + ' - only ' + a.rem + ' KMS remaining!\n'; });
   }
   return { hasAlerts: true, msg: msg };
 }
 
-// Build full message
-function buildMessage(data, dateStr, isMissed) {
-  var processors = [processTasks, processDocs, processVehicles, processMaintenance];
-  var results = processors.map(function(fn) { return fn(data); }).filter(Boolean);
-  var hasAlerts = results.some(function(r) { return r.hasAlerts; });
+var PROCESSORS = [processTasks, processDocs, processVehicles, processMaintenance];
 
+function buildMessage(data, dateStr, isMissed) {
+  var results   = PROCESSORS.map(function(fn){ return fn(data); }).filter(Boolean);
+  var hasAlerts = results.some(function(r){ return r.hasAlerts; });
   var msg = '';
   if (isMissed) {
-    msg += 'MISSED YESTERDAY - Catching up!\n';
-    msg += labelDate(dateStr) + ' (Yesterday)\n';
+    msg += 'MISSED YESTERDAY - Catching up!\n' + labelDate(dateStr) + ' (Yesterday)\n';
   } else {
-    msg += '<b>PS Expense - Daily Report</b>\n';
-    msg += labelDate(dateStr) + '\n';
+    msg += 'PS Expense - Daily Report\n' + labelDate(dateStr) + '\n';
   }
-  msg += '--------------------\n';
-
-  if (!hasAlerts) {
-    msg += '\nALL CLEAR! Everything is on track today.\n';
-  }
-
-  results.forEach(function(r) { msg += r.msg; });
-
-  msg += '\n--------------------\n';
-  if (isMissed) {
-    msg += 'Missed reminder catch-up - PS Expense App';
-  } else {
-    msg += 'Auto sent 4:00 AM - PS Expense App';
-  }
+  msg += '====================\n';
+  if (!hasAlerts) msg += '\nALL CLEAR! Everything on track today.\n';
+  results.forEach(function(r){ msg += r.msg; });
+  msg += '\n====================\n';
+  msg += isMissed ? 'Missed reminder catch-up' : 'Auto sent 4:00 AM - PS Expense';
   return msg;
 }
 
-// Main
 async function main() {
-  console.log('PS Expense Telegram Reminder starting...');
-
-  if (!USER_UID) {
-    console.error('FIREBASE_USER_UID not set!');
+  console.log('PS Expense WhatsApp Reminder starting...');
+  if (!USER_UID) { console.error('FIREBASE_USER_UID not set!'); process.exit(1); }
+  await loadWaConfig();
+  if (!WA_TOKEN || !WA_PHONE_ID || !WA_TO_NUMBER) {
+    console.error('WhatsApp details missing. Open the app > Menu > Reminder Settings > WhatsApp and save them.');
     process.exit(1);
   }
 
   var today     = todayStr();
   var yesterday = yesterdayStr();
+  var lastSent  = await getLastSentDate();
+  console.log('Today (IST):', today, '| Yesterday:', yesterday, '| Last sent:', lastSent || 'Never');
 
-  var lastSent = await getLastSentDate();
-  console.log('Last sent:', lastSent || 'Never');
-  console.log('Today (IST):', today);
-  console.log('Yesterday (IST):', yesterday);
-
-  // Load data from Firebase
   var data = {};
   try {
-    var snap = await db
-      .collection('users').doc(USER_UID)
-      .collection('data').doc('appdata')
-      .get();
+    var snap = await db.collection('users').doc(USER_UID).collection('data').doc('appdata').get();
     if (!snap.exists) {
-      await sendTelegram('<b>PS Expense</b>\n\nNo data found. Open the app first.');
+      await sendWhatsApp('PS Expense: No data found. Open the app first.');
       return;
     }
     data = snap.data();
-    console.log('Data loaded. Tasks:', (data.tasks || []).length, 'Vehicles:', (data.vehicles || []).length);
-    if(data.reminderSettings) rs = Object.assign({}, RS_DEFAULTS, data.reminderSettings);
-    console.log('Reminder settings:', JSON.stringify(rs));
+    if (data.reminderSettings) rs = Object.assign({}, RS_DEFAULTS, data.reminderSettings);
+    console.log('Data loaded. Tasks:', (data.tasks||[]).length, '| Settings:', JSON.stringify(rs));
   } catch(e) {
     console.error('Firebase error:', e.message);
-    await sendTelegram('<b>PS Expense</b>\n\nCould not read Firebase data.\nError: ' + e.message);
+    await sendWhatsApp('PS Expense: Could not read Firebase. Error: ' + e.message);
     process.exit(1);
   }
 
-  // Check if yesterday was missed
   var missedYesterday = lastSent && lastSent !== yesterday && lastSent !== today;
 
   try {
-    // Send missed day first if needed
     if (missedYesterday) {
-      console.log('Sending missed yesterday message...');
-      var missedMsg = buildMessage(data, yesterday, true);
-      await sendTelegram(missedMsg);
-      await new Promise(function(r) { setTimeout(r, 2000); });
+      console.log('Sending missed yesterday...');
+      await sendWhatsApp(buildMessage(data, yesterday, true));
+      await new Promise(function(r){ setTimeout(r, 3000); });
     }
-
-    // Send today message
-    console.log('Sending today message...');
-    var todayMsg = buildMessage(data, today, false);
-    await sendTelegram(todayMsg);
-
-    // Save today as last sent
+    console.log('Sending today...');
+    await sendWhatsApp(buildMessage(data, today, false));
     await saveLastSentDate(today);
     console.log('All done!');
-
   } catch(e) {
     console.error('Send failed:', e.message);
     process.exit(1);
   }
-
   process.exit(0);
 }
 
