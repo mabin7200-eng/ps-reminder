@@ -54,40 +54,52 @@ function cleanParam(text) {
 }
 
 // Send WhatsApp message via Meta API
+// Tries language "en" first, then "en_US" (templates created as "English (US)" use en_US)
 async function sendWhatsApp(messageText) {
   var url = 'https://graph.facebook.com/v18.0/' + WA_PHONE_ID + '/messages';
-  var body = {
-    messaging_product: 'whatsapp',
-    to: WA_TO_NUMBER,
-    type: 'template',
-    template: {
-      name: TEMPLATE_NAME,
-      language: { code: 'en' },
-      components: [{
-        type: 'body',
-        parameters: [{
-          type: 'text',
-          text: cleanParam(messageText)
+  var languages = ['en', 'en_US'];
+  var lastError = null;
+
+  for (var i = 0; i < languages.length; i++) {
+    var body = {
+      messaging_product: 'whatsapp',
+      to: WA_TO_NUMBER,
+      type: 'template',
+      template: {
+        name: TEMPLATE_NAME,
+        language: { code: languages[i] },
+        components: [{
+          type: 'body',
+          parameters: [{ type: 'text', text: cleanParam(messageText) }]
         }]
-      }]
+      }
+    };
+
+    var res = await fetch(url, {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + WA_TOKEN,
+        'Content-Type':  'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    var data = await res.json();
+
+    if (!data.error) {
+      console.log('WhatsApp sent OK (language ' + languages[i] + '). Message ID:',
+        data.messages && data.messages[0] && data.messages[0].id);
+      return true;
     }
-  };
 
-  var res = await fetch(url, {
-    method:  'POST',
-    headers: {
-      'Authorization': 'Bearer ' + WA_TOKEN,
-      'Content-Type':  'application/json'
-    },
-    body: JSON.stringify(body)
-  });
-
-  var data = await res.json();
-  if (data.error) {
-    throw new Error('WhatsApp error: ' + JSON.stringify(data.error));
+    lastError = data.error;
+    // 132001 = template not found in this language -> try the next language code
+    if (data.error.code === 132001 && i < languages.length - 1) {
+      console.log('Template not found in ' + languages[i] + ', trying ' + languages[i + 1] + '...');
+      continue;
+    }
+    break;
   }
-  console.log('WhatsApp sent OK. Message ID:', data.messages && data.messages[0] && data.messages[0].id);
-  return true;
+  throw new Error('WhatsApp error: ' + JSON.stringify(lastError));
 }
 
 // Date helpers - IST aware
