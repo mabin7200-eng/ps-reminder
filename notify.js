@@ -197,6 +197,23 @@ function taskLines(data) {
   return out.sort(function (a, b) { return a.d - b.d; }).map(function (x) { return x.text; });
 }
 
+// Customer lead follow-ups that are due today or overdue (shown with the tasks)
+function leadLines(data) {
+  var out = [];
+  (data.leads || []).forEach(function (l) {
+    if (l.status !== 'New' && l.status !== 'Follow-up') return;
+    if (!l.followUp) return;
+    var d = daysLeft(l.followUp);
+    if (d === null || d > 0) return;
+    out.push({
+      d: d,
+      text: (d < 0 ? '🔴 ' : '🟡 ') + 'Call ' + l.name + ' - ' +
+            (d < 0 ? 'follow-up overdue ' + plural(Math.abs(d), 'day') : 'follow-up today')
+    });
+  });
+  return out.sort(function (a, b) { return a.d - b.d; }).map(function (x) { return x.text; });
+}
+
 function docLines(data) {
   var out = [];
   (data.docs || []).forEach(function (doc) {
@@ -269,7 +286,7 @@ function buildSections(data, dateStr, isMissed, multi) {
   var sep = multi ? '\n' : ' | ';
   return {
     date:     (isMissed ? 'Yesterday, ' : '') + labelDate(dateStr),
-    tasks:    joinLines(taskLines(data), 280, sep),
+    tasks:    joinLines(taskLines(data).concat(leadLines(data)), 280, sep),
     docs:     joinLines(docLines(data), 280, sep),
     vehicles: joinLines(vehicleLines(data), 280, sep),
     service:  joinLines(serviceLines(data), 280, sep)
@@ -296,7 +313,7 @@ async function sendDay(data, dateStr, isMissed) {
     await sendWhatsApp(buildParams(buildSections(data, dateStr, isMissed, true), true), true);
     return;
   } catch (e) {
-    if (!/132018|132000|132012|format/i.test(e.message)) throw e;
+    if (!/132018|132000|132012|format|\(#100\)|"code":100/i.test(e.message)) throw e;
     console.log('Meta did not accept line breaks - sending single-line version instead');
   }
   await sendWhatsApp(buildParams(buildSections(data, dateStr, isMissed, false), false), false);
@@ -317,7 +334,7 @@ async function main() {
   }
 
   console.log('Sending FROM phone number ID:', WA_PHONE_ID,
-    '| TO: ending ' + String(WA_TO_NUMBER).slice(-4),
+    '| TO: ending ' + String(WA_TO_NUMBER).slice(-4) + ' (' + String(WA_TO_NUMBER).length + ' digits, starts ' + String(WA_TO_NUMBER).slice(0, 2) + ')',
     '| Template:', TEMPLATE_NAME);
 
   var today = todayStr();
@@ -354,6 +371,11 @@ async function main() {
     console.log('All done!');
   } catch (e) {
     console.error('Send failed:', e.message);
+    if (/\(#100\)|"code":100/.test(e.message)) {
+      console.error('HINT: Meta says a parameter is invalid. Most often the recipient number is wrong.');
+      console.error('HINT: It must be 12 digits starting with 91 (country code + 10-digit mobile), e.g. 91XXXXXXXXXX.');
+      console.error('HINT: Check Reminder Settings > WhatsApp > Send reminders to. Remove any 0 or spaces in front.');
+    }
     process.exit(1);
   }
   process.exit(0);
