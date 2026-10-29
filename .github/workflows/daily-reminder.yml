@@ -2,8 +2,8 @@ name: Daily WhatsApp Reminder — 4AM IST
 
 on:
   schedule:
-    # 4:00 AM IST = 10:30 PM UTC (previous day)
-    - cron: '30 22 * * *'
+    # 1:00 AM IST = 19:30 PM UTC (previous day)
+    - cron: '28 19 * * *'
   workflow_dispatch: # Manual trigger for testing
 
 jobs:
